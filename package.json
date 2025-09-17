@@ -1,0 +1,66 @@
+{
+  "name": "weao-client",
+  "version": "1.0.0",
+  "description": "TypeScript client library for the WEAO API to interact with Roblox versions and exploit statuses",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist/",
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "api": "tsx weao-fx/example.ts",
+    "start": "pnpm run build && node dist/index.js",
+    "start:dev": "tsx src/index.ts",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "type-check": "tsc --noEmit",
+    "clean": "rimraf dist",
+    "test": "jest",
+    "test:clean": "node scripts/cleanup-test-data.js",
+    "api:example": "tsx weao-fx/example.ts",
+    "strip-comments": "node scripts/strip-line-comments.cjs",
+    "prepare-push": "npm run strip-comments && git add -A",
+    "setup-hooks": "node scripts/setup-hooks.js"
+  },
+  "keywords": [
+    "weao",
+    "roblox",
+    "api",
+    "client",
+    "typescript",
+    "exploit",
+    "version"
+  ],
+  "author": "linhisreal",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^30.0.0",
+    "@types/node": "^20.8.0",
+    "@typescript-eslint/eslint-plugin": "^6.7.0",
+    "@typescript-eslint/parser": "^6.7.0",
+    "eslint": "^8.50.0",
+    "eslint-config-google": "^0.14.0",
+    "gts": "^6.0.2",
+    "jest": "^29.0.0",
+    "ts-jest": "^29.1.0",
+    "rimraf": "^5.0.0",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.0.0",
+    "typescript": "^5.2.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/linhisreal/weao-api-client.git"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^17.2.2"
+  }
+}

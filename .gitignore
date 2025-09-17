@@ -1,0 +1,12 @@
+node_modules
+specs
+.cbc-inj
+pnpm-workspace.yaml
+.env
+scripts
+dist
+data
+weao-fx
+
+#Ignore insiders AI rules
+.github\instructions\codacy.instructions.md
