@@ -4,11 +4,13 @@ specs
 .cbc-inj
 pnpm-workspace.yaml
 .env
+.github
 # Useless stuff
 scripts/setup-hooks.js
 dist
 data
 __test__
+generateTranscript.js
 # Boring stuff i made 
 weao-fx 
 generateTranscript.js
