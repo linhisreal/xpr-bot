@@ -9,7 +9,7 @@ pnpm-workspace.yaml
 scripts/setup-hooks.js
 dist
 data
-__test__
+src/__test__
 generateTranscript.js
 # Boring stuff i made 
 weao-fx 
