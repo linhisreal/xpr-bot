@@ -276,6 +276,7 @@ export class TicketChannelManager {
 
   /**
    * Sets up initial content in the ticket channel
+   * @deprecated This method is deprecated, only used for fallback scenarios
    */
   private async setupInitialTicketContent(channel: TextChannel, options: TicketChannelOptions): Promise<void> {
     if (!options.originalMessage) return;

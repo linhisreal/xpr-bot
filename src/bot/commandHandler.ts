@@ -7,6 +7,7 @@ import {
   TextChannel,
   ChannelType,
   CategoryChannel,
+  MessageFlags,
 } from 'discord.js';
 import {TicketManager} from './ticketManager.js';
 import {SupportChannelManager} from '../modules/SupportChannelManager.js';
@@ -20,7 +21,7 @@ import {
   DEFAULT_CATEGORIES,
   ERROR_MESSAGES,
   SUCCESS_MESSAGES,
-} from '../constants/commands';
+} from '../constants/commands.js';
 
 /**
  * Handles slash commands
@@ -58,7 +59,7 @@ export class CommandHandler {
     } else {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.UNKNOWN_COMMAND,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -96,7 +97,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -126,7 +127,7 @@ export class CommandHandler {
       .setColor(EMBED_COLORS.PRIMARY)
       .setTimestamp();
 
-    await this.interactionManager.safeReply(interaction, {embeds: [embed], ephemeral: true});
+    await this.interactionManager.safeReply(interaction, {embeds: [embed], flags: MessageFlags.Ephemeral});
   }
 
   /**
@@ -140,7 +141,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -149,7 +150,7 @@ export class CommandHandler {
     if (!memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.MISSING_PERMISSIONS,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -162,19 +163,19 @@ export class CommandHandler {
       if (wasAdded) {
         await this.interactionManager.safeReply(interaction, {
           content: SUCCESS_MESSAGES.STAFF_ADDED(targetUser.username),
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } else {
         await this.interactionManager.safeReply(interaction, {
           content: `${targetUser.username} is already a staff member.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
       console.error('Failed to add staff member:', error);
       await this.interactionManager.safeReply(interaction, {
         content: `❌ Failed to add ${targetUser.username} as a staff member. Please try again.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -190,7 +191,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -199,7 +200,7 @@ export class CommandHandler {
     if (!memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.MISSING_PERMISSIONS,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -212,19 +213,19 @@ export class CommandHandler {
       if (wasRemoved) {
         await this.interactionManager.safeReply(interaction, {
           content: SUCCESS_MESSAGES.STAFF_REMOVED(targetUser.username),
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       } else {
         await this.interactionManager.safeReply(interaction, {
           content: `${targetUser.username} was not a staff member.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
       }
     } catch (error) {
       console.error('Failed to remove staff member:', error);
       await this.interactionManager.safeReply(interaction, {
         content: `❌ Failed to remove ${targetUser.username} from staff. Please try again.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -242,7 +243,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -251,7 +252,7 @@ export class CommandHandler {
     if (!memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.MISSING_PERMISSIONS,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -262,7 +263,7 @@ export class CommandHandler {
     if (!targetChannel || !this.isTextCapableChannel(targetChannel)) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.INVALID_CHANNEL,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -276,7 +277,7 @@ export class CommandHandler {
       if (!categoryChannel) {
         await this.interactionManager.safeReply(interaction, {
           content: `❌ Category "${ticketCategory}" not found. Please create the category first or use an existing one.\n\n**Available categories:**\n${guild.channels.cache.filter(c => c.type === ChannelType.GuildCategory).map(c => `• ${c.name}`).join('\n') || 'No categories found'}`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -304,7 +305,7 @@ export class CommandHandler {
       if (!configurationSuccess) {
         await this.interactionManager.safeReply(interaction, {
           content: `❌ Failed to configure support channel automation for ${textChannel}.`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
@@ -317,18 +318,18 @@ export class CommandHandler {
         .setColor(EMBED_COLORS.SUPPORT)
         .addFields(
           {
-            name: '📝 Creating a Support Ticket',
-            value: '1. Describe your issue in detail as a single message\n2. A private support channel will be created instantly\n3. Our team will assist you promptly',
+            name: '\n📝 Creating a Support Ticket',
+            value: '```1. Describe your issue in detail as a single message\n2. A private support channel will be created instantly\n3. Our team will assist you promptly```',
             inline: false,
           },
           {
-            name: '📋 Important Guidelines',
-            value: '▪ One active ticket per user at a time\n▪ Provide clear and detailed descriptions\n▪ Be patient while our team responds\n▪ Use the "Close Ticket" button when resolved',
+            name: '\n📋 Important Guidelines',
+            value: '◽ One active ticket per user at a time\n◽ Provide clear and detailed descriptions\n◽ Be patient while our team responds\n◽ Use the "Close Ticket" button when resolved',
             inline: false,
           },
           {
-            name: '⚡ What happens next?',
-            value: 'Your message will be automatically processed and a dedicated support channel will be created where our team can assist you privately.',
+            name: '\n⚡ What happens next?',
+            value: 'Your message will be automatically processed and a dedicated support channel will be created where our team can assist you privately.\n> *Need immediate help? Make sure to include all relevant details in your first message.*',
             inline: false,
           },
           {
@@ -393,7 +394,7 @@ export class CommandHandler {
       
       const replySuccess = await this.interactionManager.safeReply(interaction, {
         content: SUCCESS_MESSAGES.SUPPORT_SETUP(textChannel.toString(), categoryText),
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
 
       if (!replySuccess) {
@@ -413,7 +414,7 @@ export class CommandHandler {
       console.error('Failed to setup support channel:', error);
       await this.interactionManager.safeReply(interaction, {
         content: `❌ Failed to setup support channel. Please try again.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -429,7 +430,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -438,7 +439,7 @@ export class CommandHandler {
     if (!memberPermissions?.has(PermissionFlagsBits.ManageChannels)) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.MISSING_PERMISSIONS,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -460,7 +461,7 @@ export class CommandHandler {
 
       await this.interactionManager.safeReply(interaction, {
         embeds: [embed],
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
 
       console.log(`Presence tracking ${enabled ? 'enabled' : 'disabled'} for guild ${guild.id} - embeds should be updated`);
@@ -469,7 +470,7 @@ export class CommandHandler {
       console.error('Failed to update presence tracking:', error);
       await this.interactionManager.safeReply(interaction, {
         content: '❌ Failed to update presence tracking setting. Please try again.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -485,7 +486,7 @@ export class CommandHandler {
     if (!guild) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.GUILD_ONLY,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -494,7 +495,7 @@ export class CommandHandler {
     if (staffList.length === 0) {
       await this.interactionManager.safeReply(interaction, {
         content: ERROR_MESSAGES.NO_STAFF_CONFIGURED,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -542,7 +543,7 @@ export class CommandHandler {
 
     await this.interactionManager.safeReply(interaction, {
       embeds: [embed],
-      ephemeral: true,
+      flags: MessageFlags.Ephemeral,
     });
   }
 

@@ -1,8 +1,22 @@
 import * as crypto from 'crypto';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { Client } from 'discord.js';
-import { getTicketKeyFromIds, getTicketKeyFromTicket } from '../modules/ticketKey';
+import { Client, EmbedBuilder } from 'discord.js';
+import { getTicketKeyFromIds, getTicketKeyFromTicket } from '../modules/ticketKey.js';
+import { generateTranscript, TranscriptOptions, TranscriptResult } from '../utils/transcriptGenerator.js';
+import { sendTicketSummary, TicketSendResult } from '../utils/transcriptSender.js';
+
+/**
+ * Interface for ticket summary data
+ */
+export interface TicketSummary {
+  embed: EmbedBuilder;
+  ticketData: Ticket;
+  duration: string;
+  staffHandler: string;
+  /** Optional transcript result for enhanced DM sending */
+  transcriptResult?: TranscriptResult;
+}
 
 /**
  * Presence status types from Discord.js
@@ -609,6 +623,25 @@ export class TicketManager {
       
       for (const ticket of Object.values(parsedData) as Ticket[]) {
         (ticket as any).createdAt = new Date(ticket.createdAt);
+        
+        if (ticket.isThread) {
+          if (!ticket.threadId) {
+            console.warn(`Thread ticket missing threadId during decryption:`, {
+              ticketNumber: ticket.ticketNumber,
+              channelId: ticket.channelId,
+              userId: ticket.userId
+            });
+            if (ticket.channelId && ticket.channelId.match(/^\d+$/)) {
+              (ticket as any).threadId = ticket.channelId;
+              console.log(`Auto-fixed thread ticket threadId: ${ticket.channelId}`);
+            }
+          }
+          
+          if (ticket.threadId && !ticket.isThread) {
+            console.log(`Auto-fixing isThread flag for ticket with threadId: ${ticket.threadId}`);
+            ticket.isThread = true;
+          }
+        }
       }
       
       return parsedData;
@@ -639,13 +672,39 @@ export class TicketManager {
       this.ticketCounters.clear();
 
       let migrated = false;
+      let threadTicketsRecovered = 0;
+      let totalTicketsRecovered = 0;
+      
       for (const [guildId, guildData] of Object.entries(ticketFile.guilds)) {
         const decryptedTickets = this.decryptTicketData(guildData.encryptedTickets);
         const guildTickets = new Map<string, Ticket>();
+        let guildThreadTickets = 0;
 
         for (const [ticketId, ticket] of Object.entries(decryptedTickets)) {
+          if (ticket.isThread) {
+            guildThreadTickets++;
+            
+            if (!ticket.threadId) {
+              console.log(`Recovering thread ticket threadId from key: ${ticketId}`);
+              (ticket as any).threadId = ticketId;
+              migrated = true;
+            }
+            
+            const expectedKey = ticket.threadId!;
+            if (ticketId !== expectedKey) {
+              console.warn(`Thread ticket key mismatch during load: stored as ${ticketId}, expected ${expectedKey}`);
+              guildTickets.set(expectedKey, ticket);
+              migrated = true;
+              continue;
+            }
+          }
+          
           guildTickets.set(ticketId, ticket);
+          totalTicketsRecovered++;
         }
+        
+        threadTicketsRecovered += guildThreadTickets;
+        console.log(`Guild ${guildId}: Recovered ${Object.keys(decryptedTickets).length} tickets (${guildThreadTickets} thread tickets)`);
 
         this.tickets.set(guildId, guildTickets);
         this.ticketCounters.set(guildId, guildData.ticketCounter);
@@ -665,9 +724,12 @@ export class TicketManager {
         try {
           await this.backupFile(this.ticketsFilePath);
           await fs.writeFile(this.ticketsFilePath, JSON.stringify(ticketFile, null, 2), 'utf8');
-          if (!process.env.JEST_WORKER_ID) console.log('Persisted migrated tickets data to GCM format');
+          if (!process.env.JEST_WORKER_ID) {
+            console.log('Persisted migrated ticket data to GCM format');
+            console.log(`Migration completed: ${totalTicketsRecovered} tickets (${threadTicketsRecovered} thread tickets)`);
+          }
         } catch (writeErr) {
-          if (process.env.DEBUG_STAFF_KEY === '1') console.warn('Failed to persist migrated tickets data during load:', writeErr);
+          if (process.env.DEBUG_STAFF_KEY === '1') console.warn('Failed to persist migrated ticket data during load:', writeErr);
         }
       }
 
@@ -741,6 +803,10 @@ export class TicketManager {
     description?: string,
     threadId?: string
   ): Ticket {
+    const validatedDescription = description && description.trim() 
+      ? description.trim() 
+      : undefined;
+
     const ticket: Ticket = {
       guildId,
       userId,
@@ -748,18 +814,65 @@ export class TicketManager {
       threadId,
       ticketNumber,
       createdAt: new Date(),
-      description,
+      description: validatedDescription,
       isLocked: false,
       channelName,
       isThread: !!threadId,
     };
 
     this.ensureGuildState(guildId);
-  const ticketKey = getTicketKeyFromIds(channelId, threadId);
+    const ticketKey = getTicketKeyFromIds(channelId, threadId);
+    
+    if (threadId && ticketKey !== threadId) {
+      console.error(`Thread ticket key generation error: expected ${threadId}, got ${ticketKey}`);
+    }
+    
+    const existingTicket = this.tickets.get(guildId)!.get(ticketKey);
+    if (existingTicket) {
+      console.warn(`Ticket key collision detected: ${ticketKey}`, {
+        existing: {
+          userId: existingTicket.userId,
+          isThread: existingTicket.isThread,
+          threadId: existingTicket.threadId,
+          channelId: existingTicket.channelId
+        },
+        new: {
+          userId: ticket.userId,
+          isThread: ticket.isThread,
+          threadId: ticket.threadId,
+          channelId: ticket.channelId
+        }
+      });
+    }
+    
+    if (threadId) {
+      console.log(`Creating thread ticket:`, {
+        guildId,
+        userId,
+        ticketNumber,
+        channelId,
+        threadId,
+        ticketKey,
+        description: validatedDescription?.substring(0, 50) + '...'
+      });
+    }
+    
     this.tickets.get(guildId)!.set(ticketKey, ticket);
     this.scheduleSaveTicketData();
     
     return ticket;
+  }
+
+  /**
+   * Helper method to retrieve ticket description for display purposes
+   */
+  getTicketDescription(guildId: string, id: string): string | null {
+    const ticket = this.getTicket(guildId, id);
+    if (!ticket) {
+      return null;
+    }
+    
+    return ticket.description || null;
   }
 
   /**
@@ -989,6 +1102,126 @@ export class TicketManager {
   }
 
   /**
+   * Generates a comprehensive ticket summary
+   */
+  generateTicketSummary(guildId: string, id: string): TicketSummary | null {
+    const ticket = this.getTicket(guildId, id);
+    if (!ticket) {
+      console.error(`Cannot generate summary: Ticket ${id} not found in guild ${guildId}`);
+      return null;
+    }
+
+    try {
+      const now = new Date();
+      const createdAt = new Date(ticket.createdAt);
+      const durationMs = now.getTime() - createdAt.getTime();
+      const hours = Math.floor(durationMs / (1000 * 60 * 60));
+      const minutes = Math.floor((durationMs % (1000 * 60 * 60)) / (1000 * 60));
+      const duration = hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+
+      let staffHandler = 'Unassigned';
+      if (ticket.claimedBy) {
+        staffHandler = `<@${ticket.claimedBy}>`;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle(`🎫 Ticket #${ticket.ticketNumber} - Closed`)
+        .setDescription(ticket.description || 'No description provided')
+        .addFields(
+          {
+            name: '📝 Ticket Information',
+            value: [
+              `**Ticket ID:** ${ticket.ticketNumber}`,
+              `**Channel:** ${ticket.isThread ? 'Thread' : 'Channel'}`,
+              `**Created:** <t:${Math.floor(createdAt.getTime() / 1000)}:F>`,
+              `**Duration:** ${duration}`,
+              `**Staff Handler:** ${staffHandler}`
+            ].join('\n'),
+            inline: false
+          }
+        )
+        .setColor(0xff6b35)
+        .setTimestamp()
+        .setFooter({ text: 'Ticket closed' });
+
+      if (ticket.notes && ticket.notes.trim()) {
+        embed.addFields({
+          name: '📋 Staff Notes',
+          value: ticket.notes.length > 1024 ? ticket.notes.substring(0, 1021) + '...' : ticket.notes,
+          inline: false
+        });
+      }
+
+      if (ticket.escalationLevel && ticket.escalationLevel > 0) {
+        embed.addFields({
+          name: '⚠️ Escalation Level',
+          value: `Level ${ticket.escalationLevel}`,
+          inline: true
+        });
+      }
+
+      if (ticket.whitelistedUsers && ticket.whitelistedUsers.length > 0) {
+        const whitelistText = ticket.whitelistedUsers.map(userId => `<@${userId}>`).join(', ');
+        embed.addFields({
+          name: '👥 Whitelisted Users',
+          value: whitelistText.length > 1024 ? whitelistText.substring(0, 1021) + '...' : whitelistText,
+          inline: false
+        });
+      }
+
+      console.log(`Generated summary for ticket ${ticket.ticketNumber} in guild ${guildId}`);
+      
+      return {
+        embed,
+        ticketData: ticket,
+        duration,
+        staffHandler
+      };
+    } catch (error) {
+      console.error(`Failed to generate ticket summary for ${id}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Sends ticket summary via DM to the ticket creator
+   */
+  async sendTicketSummaryDM(ticketSummary: TicketSummary): Promise<boolean>;
+  async sendTicketSummaryDM(ticketSummary: TicketSummary, reason?: string): Promise<TicketSendResult>;
+  async sendTicketSummaryDM(ticketSummary: TicketSummary, reason?: string): Promise<boolean | TicketSendResult> {
+    if (ticketSummary.transcriptResult) {
+      const result = await sendTicketSummary(ticketSummary, this.client!, reason || '');
+      return result.wasSent;
+    }
+
+    if (!this.client) {
+      console.error('Client not available for sending DM');
+      return false;
+    }
+
+    try {
+      const user = await this.client.users.fetch(ticketSummary.ticketData.userId);
+
+      const dmMessage = [
+        `Hi ${user.username}! Your support ticket has been closed.`,
+        '',
+        'Here\'s a summary of your ticket:'
+      ].join('\n');
+
+      await user.send({
+        content: dmMessage,
+        embeds: [ticketSummary.embed]
+      });
+
+      console.log(`Successfully sent ticket summary DM to user ${ticketSummary.ticketData.userId} for ticket #${ticketSummary.ticketData.ticketNumber}`);
+      return true;
+    } catch (error) {
+      console.log(`Failed to send ticket summary DM to user ${ticketSummary.ticketData.userId}:`, error instanceof Error ? error.message : 'Unknown error');
+      return false;
+    }
+  }
+
+  /**
    * Closes a ticket by channel ID or thread ID.
    */
   closeTicket(guildId: string, id: string): boolean {
@@ -1015,19 +1248,43 @@ export class TicketManager {
    * Gets a ticket by thread ID.
    */
   getTicketByThread(guildId: string, threadId: string): Ticket | undefined {
-    return this.tickets.get(guildId)?.get(threadId);
+    const ticket = this.tickets.get(guildId)?.get(threadId);
+    
+    if (ticket && ticket.isThread && ticket.threadId !== threadId) {
+      console.warn(`Thread ticket validation failed: expected threadId ${threadId}, got ${ticket.threadId}`);
+      return undefined;
+    }
+    
+    return ticket;
   }
 
   /**
    * Gets a ticket by either channel ID or thread ID.
    */
   getTicket(guildId: string, id: string): Ticket | undefined {
-    return this.getTicketByChannel(guildId, id) || this.getTicketByThread(guildId, id);
+    const guildTickets = this.tickets.get(guildId);
+    if (!guildTickets) {
+      return undefined;
+    }
+    
+    const ticket = guildTickets.get(id);
+    if (!ticket) {
+      return undefined;
+    }
+    
+    if (ticket.isThread && ticket.threadId !== id) {
+      console.warn(`Ticket key mismatch: key=${id}, ticket.threadId=${ticket.threadId}`);
+      return undefined;
+    }
+    
+    if (!ticket.isThread && ticket.channelId !== id) {
+      console.warn(`Ticket key mismatch: key=${id}, ticket.channelId=${ticket.channelId}`);
+      return undefined;
+    }
+    
+    return ticket;
   }
 
-  /**
-   * Gets a user's active ticket.
-   */
   getUserTicket(guildId: string, userId: string): Ticket | undefined {
     const guildTickets = this.tickets.get(guildId);
     if (!guildTickets) {
@@ -1037,11 +1294,11 @@ export class TicketManager {
     for (const ticket of guildTickets.values()) {
       if (ticket.userId === userId) {
         
-        if (ticket.isThread && ticket.threadId && this.client) {
+        if (ticket.isThread && ticket.threadId && this.client && !process.env.JEST_WORKER_ID) {
           this.validateTicketThread(guildId, ticket.threadId).then(exists => {
             if (!exists) {
-              console.log(`Auto-cleaning stale ticket ${ticket.channelId} - thread no longer exists`);
-              this.closeTicket(guildId, ticket.channelId);
+              console.log(`Auto-cleaning stale ticket ${getTicketKeyFromTicket(ticket)} - thread no longer exists`);
+              this.closeTicket(guildId, getTicketKeyFromTicket(ticket));
             }
           }).catch(error => {
             console.error('Error during async thread validation:', error);
@@ -1411,14 +1668,33 @@ export class TicketManager {
   }
 
   /**
-   * Closes a ticket with staff verification
+   * Closes a ticket with staff verification and returns ticket summary
    */
-  closeTicketWithAuth(guildId: string, id: string, staffId: string): boolean {
-    if (!this.isStaff(guildId, staffId)) return false;
-    return this.closeTicket(guildId, id);
-  }
+  closeTicketWithAuth(guildId: string, id: string, staffId: string): Promise<{ success: boolean; summary: TicketSummary | null }>;
+  closeTicketWithAuth(guildId: string, id: string, staffId: string, generateTranscript: boolean): Promise<{ success: boolean; summary: TicketSummary | null; transcript?: TranscriptResult | null }>;
+  async closeTicketWithAuth(guildId: string, id: string, staffId: string, generateTranscript: boolean = false): Promise<{ success: boolean; summary: TicketSummary | null; transcript?: TranscriptResult | null }> {
+    if (!this.isStaff(guildId, staffId)) {
+      return { success: false, summary: null };
+    }
 
-  /**
+    let transcript: TranscriptResult | null = null;
+    if (generateTranscript) {
+      transcript = await this.generateTicketTranscript(guildId, id);
+      if (!transcript || !transcript.success) {
+        console.warn(`Failed to generate transcript for ticket ${id}, proceeding with summary only`);
+      }
+    }
+
+    const summary = this.generateTicketSummary(guildId, id);
+    
+    if (summary && transcript && transcript.success) {
+      summary.transcriptResult = transcript;
+    }
+    
+    const closed = this.closeTicket(guildId, id);
+
+    return { success: closed, summary, transcript };
+  }  /**
    * Adds a user to the ticket whitelist
    */
   addUserToWhitelist(guildId: string, ticketId: string, userId: string, staffId: string): boolean {
@@ -1487,18 +1763,131 @@ export class TicketManager {
   }
 
   /**
-   * Cleans up test data (for testing only).
+   * Generates a transcript for a ticket channel
    */
-  async cleanupTestData(): Promise<void> {
+  async generateTicketTranscript(guildId: string, ticketId: string, options: Partial<TranscriptOptions> = {}): Promise<TranscriptResult | null> {
+    if (!this.client) {
+      console.error('TicketManager: No client available for transcript generation');
+      return null;
+    }
+
+    const ticket = this.getTicket(guildId, ticketId);
+    if (!ticket) {
+      console.error(`Cannot generate transcript: Ticket ${ticketId} not found in guild ${guildId}`);
+      return null;
+    }
+
     try {
-      await fs.unlink(this.staffFilePath);
-    } catch { void 0; }
+      const guild = this.client.guilds.cache.get(guildId);
+      if (!guild) {
+        console.error(`Cannot generate transcript: Guild ${guildId} not found`);
+        return null;
+      }
+
+      let channel;
+      if (ticket.isThread && ticket.threadId) {
+        channel = await guild.channels.fetch(ticket.threadId).catch(() => null);
+        if (!channel || !channel.isThread()) {
+          console.error(`Cannot generate transcript: Thread ${ticket.threadId} not found or not accessible`);
+          return null;
+        }
+      } else {
+        channel = await guild.channels.fetch(ticket.channelId).catch(() => null);
+        if (!channel || !channel.isTextBased()) {
+          console.error(`Cannot generate transcript: Channel ${ticket.channelId} not found or not text-based`);
+          return null;
+        }
+      }
+
+      const transcriptOptions: TranscriptOptions = {
+        channel,
+        darkMode: true,
+        limit: 500,
+        includeReactions: true,
+        includeComponents: true,
+        includeToc: true,
+        includeSearch: true,
+        includeJumpNav: true,
+        ...options
+      };
+
+      const result = await generateTranscript(transcriptOptions);
+      console.log(`Generated transcript for ticket #${ticket.ticketNumber} in guild ${guildId}`);
+      return result;
+
+    } catch (error) {
+      console.error(`Failed to generate transcript for ticket ${ticketId}:`, error);
+      return null;
+    }
+  }
+
+  /**
+   * Generates and saves a transcript file for a ticket
+   */
+  async generateAndSaveTicketTranscript(guildId: string, ticketId: string, outputPath?: string): Promise<{ success: boolean; filePath?: string; transcript?: TranscriptResult }> {
+    const transcript = await this.generateTicketTranscript(guildId, ticketId);
+    if (!transcript || !transcript.success) {
+      return { success: false };
+    }
+
     try {
-      await fs.unlink(this.ticketsFilePath);
-    } catch { void 0; }
-    this.guildStaff.clear();
-    this.tickets.clear();
-    this.ticketCounters.clear();
+      const ticket = this.getTicket(guildId, ticketId);
+      if (!ticket) {
+        return { success: false };
+      }
+
+      const fileName = `ticket-${ticket.ticketNumber}-transcript.html`;
+      const filePath = outputPath || path.join(process.cwd(), 'transcripts', fileName);
+
+      const dir = path.dirname(filePath);
+      await fs.mkdir(dir, { recursive: true });
+
+      await fs.writeFile(filePath, transcript.html, 'utf8');
+
+      console.log(`Saved transcript for ticket #${ticket.ticketNumber} to ${filePath}`);
+      return { success: true, filePath, transcript };
+
+    } catch (error) {
+      console.error('Failed to save transcript file:', error);
+      return { success: false };
+    }
+  }
+
+  /**
+   * Closes a ticket with transcript generation
+   */
+  async closeTicketWithTranscript(guildId: string, ticketId: string, staffId: string, saveTranscript: boolean = true): Promise<{ 
+    success: boolean; 
+    summary: TicketSummary | null; 
+    transcript?: TranscriptResult | null;
+    transcriptPath?: string 
+  }> {
+    if (!this.isStaff(guildId, staffId)) {
+      return { success: false, summary: null };
+    }
+
+    let transcript: TranscriptResult | null = null;
+    let transcriptPath: string | undefined;
+
+    if (saveTranscript) {
+      const transcriptResult = await this.generateAndSaveTicketTranscript(guildId, ticketId);
+      if (transcriptResult.success && transcriptResult.transcript) {
+        transcript = transcriptResult.transcript;
+        transcriptPath = transcriptResult.filePath;
+      }
+    } else {
+      transcript = await this.generateTicketTranscript(guildId, ticketId);
+    }
+
+    const summary = this.generateTicketSummary(guildId, ticketId);
+    const closed = this.closeTicket(guildId, ticketId);
+
+    return { 
+      success: closed, 
+      summary, 
+      transcript,
+      transcriptPath 
+    };
   }
 
   /**
@@ -1508,6 +1897,40 @@ export class TicketManager {
     if (this.ticketSaveTimer) {
       clearTimeout(this.ticketSaveTimer);
       this.ticketSaveTimer = null;
+    }
+  }
+
+  /**
+   * Test helper: cleanup test data files (only available in test environment)
+   */
+  public async cleanupTestData(): Promise<void> {
+    if (!process.env.JEST_WORKER_ID) {
+      throw new Error('cleanupTestData can only be called in test environment');
+    }
+
+    try {
+      const staffDir = path.dirname(this.staffFilePath);
+      const staffFiles = await fs.readdir(staffDir).catch(() => []);
+      for (const file of staffFiles) {
+        if (file.startsWith('test-staff-') && file.endsWith('.json')) {
+          try {
+            await fs.unlink(path.join(staffDir, file));
+          } catch (error) {
+          }
+        }
+      }
+
+      const ticketsDir = path.dirname(this.ticketsFilePath);
+      const ticketFiles = await fs.readdir(ticketsDir).catch(() => []);
+      for (const file of ticketFiles) {
+        if (file.startsWith('test-tickets-') && file.endsWith('.json')) {
+          try {
+            await fs.unlink(path.join(ticketsDir, file));
+          } catch (error) {
+          }
+        }
+      }
+    } catch (error) {
     }
   }
 }

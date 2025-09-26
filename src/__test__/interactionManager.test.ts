@@ -133,7 +133,7 @@ describe('InteractionManager', () => {
       const result = await interactionManager.safeRespond(mockInteraction, { content: 'Test response' });
       
       expect(result).toBe(true);
-      expect(mockInteraction.reply).toHaveBeenCalledWith({ content: 'Test response', ephemeral: true });
+      expect(mockInteraction.reply).toHaveBeenCalledWith({ content: 'Test response', flags: 64 });
     });
 
     test('should edit reply when interaction is deferred', async () => {

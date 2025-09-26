@@ -5,6 +5,7 @@ import {
   CategoryChannel,
   ChannelType,
   EmbedBuilder,
+  Client,
 } from 'discord.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -32,6 +33,7 @@ export interface MessageProcessResult {
   success: boolean;
   shouldCreateTicket: boolean;
   ticketCreated?: boolean;
+  dmAvailable?: boolean;
   error?: string;
 }
 
@@ -41,15 +43,54 @@ export interface MessageProcessResult {
 export class SupportChannelManager {
   private supportChannels: Map<string, SupportChannelConfig> = new Map();
   private channelRefs: Map<string, TextChannel> = new Map();
+  private client: Client | null = null;
 
   constructor() {
     this.loadSupportChannelData();
   }
 
   /**
+   * Sets the Discord client for channel fetching operations
+   */
+  setClient(client: Client): void {
+    this.client = client;
+    console.log('SupportChannelManager: Discord client set, ready for channel operations');
+  }
+
+  /**
+   * Recovers channel references for all configured support channels
+   */
+  async recoverChannelReferences(): Promise<void> {
+    if (!this.client) {
+      console.warn('SupportChannelManager: Cannot recover channel references - no client available');
+      return;
+    }
+
+    console.log('SupportChannelManager: Starting channel reference recovery...');
+    let recoveredCount = 0;
+    
+    for (const [channelId] of this.supportChannels) {
+      try {
+        const channel = await this.client.channels.fetch(channelId);
+        if (channel && channel.type === ChannelType.GuildText) {
+          this.channelRefs.set(channelId, channel as TextChannel);
+          recoveredCount++;
+          console.log(`SupportChannelManager: Recovered channel reference for ${channelId}`);
+        } else {
+          console.warn(`SupportChannelManager: Channel ${channelId} is not a text channel or doesn't exist`);
+        }
+      } catch (error) {
+        console.error(`SupportChannelManager: Failed to recover channel ${channelId}:`, error);
+      }
+    }
+    
+    console.log(`SupportChannelManager: Channel reference recovery complete. Recovered ${recoveredCount}/${this.supportChannels.size} channels`);
+  }
+
+  /**
    * Loads support channel configuration from file
    */
-  private loadSupportChannelData(): void {
+  private async loadSupportChannelData(client?: Client): Promise<void> {
     try {
       console.log(`Attempting to load support channel data from: ${DATA_FILE_PATH}`);
       if (fs.existsSync(DATA_FILE_PATH)) {
@@ -62,6 +103,18 @@ export class SupportChannelManager {
             if (config && typeof config === 'object') {
               this.supportChannels.set(channelId, config as SupportChannelConfig);
               console.log(`Loaded support channel config for channel: ${channelId}`);
+              
+              if (client) {
+                try {
+                  const channel = await client.channels.fetch(channelId);
+                  if (channel && channel.type === ChannelType.GuildText) {
+                    this.channelRefs.set(channelId, channel as TextChannel);
+                    console.log(`SupportChannelManager: Fetched channel reference for ${channelId} during startup`);
+                  }
+                } catch (error) {
+                  console.warn(`SupportChannelManager: Could not fetch channel ${channelId} during startup:`, error);
+                }
+              }
             }
           }
           console.log(`Successfully loaded ${this.supportChannels.size} support channel configurations`);
@@ -132,6 +185,29 @@ export class SupportChannelManager {
   }
 
   /**
+   * Checks if a user has DMs enabled by attempting to create a DM channel
+   */
+  private async checkUserDMAvailability(message: Message): Promise<boolean> {
+    try {
+      const dmChannel = await message.author.createDM();
+      const testMessage = await dmChannel.send('DM test - this message will be deleted immediately');
+      await testMessage.delete();
+      console.log('SupportChannelManager: DMs available for user', {
+        userId: message.author.id,
+        username: message.author.username
+      });
+      return true;
+    } catch (error) {
+      console.log('SupportChannelManager: DMs unavailable for user', {
+        userId: message.author.id,
+        username: message.author.username,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      return false;
+    }
+  }
+
+  /**
    * Processes a message in a support channel for potential ticket creation
    */
   async processMessage(message: Message): Promise<MessageProcessResult> {
@@ -168,26 +244,32 @@ export class SupportChannelManager {
     }
 
     try {
+      const dmAvailable = await this.checkUserDMAvailability(message);
       
       const shouldCreateTicket = await this.shouldCreateTicketFromMessage(message);
       
+      const finalShouldCreateTicket = shouldCreateTicket && dmAvailable;
+      
       console.log('SupportChannelManager: Ticket creation decision', {
         shouldCreateTicket,
+        dmAvailable,
+        finalShouldCreateTicket,
         messageContent: message.content.substring(0, 100)
       });
 
-      if (config.deleteUserMessages) {
+      if (config?.deleteUserMessages) {
         try {
           await message.delete();
-          console.log('SupportChannelManager: Deleted user message per configuration');
+          console.log('SupportChannelManager: Deleted message (moved to ticket)');
         } catch (error) {
-          console.warn('SupportChannelManager: Failed to delete message:', error);
+          console.error('SupportChannelManager: Failed to delete message:', error);
         }
       }
 
       return {
         success: true,
         shouldCreateTicket: shouldCreateTicket,
+        dmAvailable,
         ticketCreated: false
       };
     } catch (error) {
@@ -226,6 +308,98 @@ export class SupportChannelManager {
     console.log('SupportChannelManager: Clearing all configurations for test isolation');
     this.supportChannels.clear();
     this.channelRefs.clear();
+  }
+
+  /**
+   * Removes specific test channels from both memory and file storage
+   * Used for test cleanup to prevent test data persistence
+   */
+  removeTestChannels(testChannelIds: string[]): void {
+    console.log('SupportChannelManager: Removing test channels:', testChannelIds);
+
+    testChannelIds.forEach(channelId => {
+      this.supportChannels.delete(channelId);
+      this.channelRefs.delete(channelId);
+    });
+
+    this.removeChannelsFromFile(testChannelIds);
+  }
+
+  /**
+   * Removes specific channel IDs from the JSON file
+   */
+  private removeChannelsFromFile(channelIds: string[]): void {
+    try {
+      if (!fs.existsSync(DATA_FILE_PATH)) {
+        return;
+      }
+
+      const data = fs.readFileSync(DATA_FILE_PATH, 'utf8');
+      let parsed = JSON.parse(data);
+      
+      if (parsed && typeof parsed === 'object') {
+        channelIds.forEach(channelId => {
+          delete parsed[channelId];
+        });
+        
+        const dataDir = path.dirname(DATA_FILE_PATH);
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true });
+        }
+        
+        fs.writeFileSync(DATA_FILE_PATH, JSON.stringify(parsed, null, 2));
+        console.log('SupportChannelManager: Removed test channels from file storage');
+      }
+    } catch (error) {
+      console.error('SupportChannelManager: Failed to remove test channels from file:', error);
+    }
+  }
+
+  /**
+   * Backup current configuration file (for testing)
+   */
+  backupConfigurationFile(): void {
+    try {
+      if (fs.existsSync(DATA_FILE_PATH)) {
+        const backupPath = DATA_FILE_PATH + '.backup';
+        fs.copyFileSync(DATA_FILE_PATH, backupPath);
+        console.log('SupportChannelManager: Configuration file backed up');
+      }
+    } catch (error) {
+      console.error('SupportChannelManager: Failed to backup configuration file:', error);
+    }
+  }
+
+  /**
+   * Restore configuration file from backup (for testing)
+   */
+  restoreConfigurationFile(): void {
+    try {
+      const backupPath = DATA_FILE_PATH + '.backup';
+      if (fs.existsSync(backupPath)) {
+        fs.copyFileSync(backupPath, DATA_FILE_PATH);
+        fs.unlinkSync(backupPath);
+        console.log('SupportChannelManager: Configuration file restored from backup');
+      }
+    } catch (error) {
+      console.error('SupportChannelManager: Failed to restore configuration file:', error);
+    }
+  }
+
+  /**
+   * Clear configuration file for test isolation
+   */
+  clearConfigurationFile(): void {
+    try {
+      const dataDir = path.dirname(DATA_FILE_PATH);
+      if (!fs.existsSync(dataDir)) {
+        fs.mkdirSync(dataDir, { recursive: true });
+      }
+      fs.writeFileSync(DATA_FILE_PATH, JSON.stringify({}, null, 2));
+      console.log('SupportChannelManager: Configuration file cleared for test isolation');
+    } catch (error) {
+      console.error('SupportChannelManager: Failed to clear configuration file:', error);
+    }
   }
 
   /**
@@ -284,6 +458,8 @@ export class SupportChannelManager {
 
   /**
    * Sends the initial configuration message to the support channel
+   * @deprecated This method is deprecated, at first i want to make it complicated
+   * but now I realize it's not necessary. I'll keep it for backward compatibility
    */
   private async sendConfigurationMessage(
     channel: TextChannel,
@@ -305,6 +481,11 @@ export class SupportChannelManager {
       `• Delete user messages: ${config.deleteUserMessages ? '✅ Enabled' : '❌ Disabled'}`,
       `• Ticket category: ${config.ticketCategory || 'Default'}`,
       `• Message filtering: ${config.strictFiltering ? '🔒 Strict' : '🔓 Permissive'}`,
+      '',
+      '**📨 DM Requirements:**',
+      '• Please ensure your DMs are enabled to receive ticket summaries',
+      '• When tickets are closed, summaries will be sent via direct message',
+      '• Tickets will still be created even if DMs are disabled',
       '',
       '*Ready to help! Just send your message below.*'
     ].join('\n');
@@ -331,35 +512,21 @@ export class SupportChannelManager {
       return false;
     }
     
-    if (message.content && message.content.trim().length < 1) {
-      console.log('SupportChannelManager: Message too short', {
-        content: message.content.trim(),
-        length: message.content.trim().length
+    const spamPhrases = ['test', 'ping', 'https://', 'http://', 'www.'];
+    const lowerContent = message.content?.toLowerCase().trim();
+    if (lowerContent && spamPhrases.includes(lowerContent)) {
+      console.log('SupportChannelManager: Message is spam phrase', {
+        content: lowerContent,
+        strictMode: useStrictFiltering
       });
       return false;
     }
+
     if (useStrictFiltering) {
       if (message.content && message.content.trim().length < 10) {
         console.log('SupportChannelManager: Message too short (strict mode)', {
           content: message.content.trim(),
           length: message.content.trim().length
-        });
-        return false;
-      }
-      const spamPhrases = ['test', 'ping'];
-      const lowerContent = message.content?.toLowerCase().trim();
-      if (lowerContent && spamPhrases.includes(lowerContent)) {
-        console.log('SupportChannelManager: Message is spam phrase (strict mode)', {
-          content: lowerContent
-        });
-        return false;
-      }
-    } else {
-      const spamPhrases = ['test', 'ping'];
-      const lowerContent = message.content?.toLowerCase().trim();
-      if (lowerContent && spamPhrases.includes(lowerContent)) {
-        console.log('SupportChannelManager: Message is spam phrase', {
-          content: lowerContent
         });
         return false;
       }
@@ -413,6 +580,29 @@ export class SupportChannelManager {
   }
 
   /**
+   * Fallback method to fetch channels when channelRefs is empty
+   */
+  private async fallbackChannelFetching(guild: Guild): Promise<void> {
+    console.log(`SupportChannelManager: Attempting fallback channel fetching for guild ${guild.id}`);
+    let fetchedCount = 0;
+    
+    for (const [channelId] of this.supportChannels) {
+      try {
+        const channel = await guild.channels.fetch(channelId);
+        if (channel && channel.type === ChannelType.GuildText && channel.guild.id === guild.id) {
+          this.channelRefs.set(channelId, channel as TextChannel);
+          fetchedCount++;
+          console.log(`SupportChannelManager: Fallback fetched channel ${channelId}`);
+        }
+      } catch (error) {
+        console.warn(`SupportChannelManager: Fallback fetch failed for channel ${channelId}:`, error);
+      }
+    }
+    
+    console.log(`SupportChannelManager: Fallback channel fetching complete. Fetched ${fetchedCount} channels`);
+  }
+
+  /**
    * Updates staff presence information in support channel embeds
    */
   async updateStaffPresenceEmbed(
@@ -421,13 +611,22 @@ export class SupportChannelManager {
     guild: Guild
   ): Promise<boolean> {
     try {
+      if (this.channelRefs.size === 0 && this.supportChannels.size > 0) {
+        console.log('SupportChannelManager: channelRefs is empty, attempting fallback channel fetching...');
+        await this.fallbackChannelFetching(guild);
+      }
+
       const guildSupportChannels = Array.from(this.supportChannels.values())
         .filter(config => {
           const channel = this.channelRefs.get(config.channelId);
-          return channel?.guild.id === guildId;
+          if (channel) {
+            return channel.guild.id === guildId;
+          }
+          return true;
         });
 
       if (guildSupportChannels.length === 0) {
+        console.log(`SupportChannelManager: No support channels found for guild ${guildId}`);
         return false;
       }
 
@@ -440,12 +639,17 @@ export class SupportChannelManager {
 
       let staffStatusText = '';
       let totalStaffFound = 0;
+      let onlineCount = 0;
 
       for (const [userId, presence] of staffPresenceMap) {
         try {
           const member = await guild.members.fetch(userId);
           const displayName = member.displayName || member.user.username;
           const status = presence.status;
+          
+          if (status === 'online' || status === 'idle') {
+            onlineCount++;
+          }
           
           const emoji = statusEmojis[status as keyof typeof statusEmojis] || '⚫';
           staffStatusText += `${emoji} ${displayName} - ${status.charAt(0).toUpperCase() + status.slice(1)}\n`;
@@ -459,8 +663,25 @@ export class SupportChannelManager {
         staffStatusText = 'No staff members found or all staff are offline.';
       }
 
+      const headerText = `**Staff Online:** ${onlineCount}/${totalStaffFound} staff members available`;
+
       for (const config of guildSupportChannels) {
-        const channel = this.channelRefs.get(config.channelId);
+        let channel = this.channelRefs.get(config.channelId);
+        
+        if (!channel) {
+          try {
+            const fetchedChannel = await guild.channels.fetch(config.channelId);
+            if (fetchedChannel && fetchedChannel.type === ChannelType.GuildText) {
+              channel = fetchedChannel as TextChannel;
+              this.channelRefs.set(config.channelId, channel);
+              console.log(`SupportChannelManager: Fetched channel ${config.channelId} on-demand`);
+            }
+          } catch (error) {
+            console.error(`SupportChannelManager: Failed to fetch channel ${config.channelId}:`, error);
+            continue;
+          }
+        }
+        
         if (channel) {
           try {
             let targetMessage = null;
@@ -470,25 +691,30 @@ export class SupportChannelManager {
                 targetMessage = await channel.messages.fetch(config.staffEmbedMessageId);
                 console.log(`Found stored support embed message ${config.staffEmbedMessageId} in channel ${config.channelId}`);
               } catch (error) {
-                console.warn(`Stored message ID ${config.staffEmbedMessageId} not found, will search for embed`);
+                console.warn(`SupportChannelManager: Stored message ID ${config.staffEmbedMessageId} is invalid, cleaning up and searching for embed`);
                 config.staffEmbedMessageId = undefined;
                 this.saveSupportChannelData();
               }
             }
             
             if (!targetMessage) {
-              const messages = await channel.messages.fetch({ limit: 10 });
-              targetMessage = messages.find(msg => 
-                msg.author.id === channel.client.user?.id && 
-                msg.embeds.length > 0 && 
-                msg.embeds[0].fields && 
-                msg.embeds[0].fields.some(field => field.name === '�‍💼 Staff Availability')
-              );
-              
-              if (targetMessage) {
-                config.staffEmbedMessageId = targetMessage.id;
-                this.saveSupportChannelData();
-                console.log(`Found and stored support embed message ID ${targetMessage.id} in channel ${config.channelId}`);
+              console.log(`SupportChannelManager: Searching for staff embed in recent messages for channel ${config.channelId}`);
+              try {
+                const messages = await channel.messages.fetch({ limit: 20 });
+                targetMessage = messages.find(msg => 
+                  msg.author.id === channel.client.user?.id && 
+                  msg.embeds.length > 0 && 
+                  msg.embeds[0].fields && 
+                  msg.embeds[0].fields.some(field => field.name === '👨‍💼 Staff Availability')
+                );
+                
+                if (targetMessage) {
+                  config.staffEmbedMessageId = targetMessage.id;
+                  this.saveSupportChannelData();
+                  console.log(`SupportChannelManager: Found and stored support embed message ID ${targetMessage.id} in channel ${config.channelId}`);
+                }
+              } catch (error) {
+                console.error(`SupportChannelManager: Failed to search for embed messages in channel ${config.channelId}:`, error);
               }
             }
 
@@ -523,20 +749,25 @@ export class SupportChannelManager {
                 }
               }
 
-              await targetMessage.edit({ embeds: [updatedEmbed] });
+              await targetMessage.edit({ 
+                content: headerText,
+                embeds: [updatedEmbed] 
+              });
               console.log(`Updated staff availability field in support embed for channel ${config.channelId}`);
             } else {
-              console.warn(`Could not find support embed to update in channel ${config.channelId}`);
+              console.warn(`SupportChannelManager: Could not find support embed to update in channel ${config.channelId}`);
             }
           } catch (error) {
-            console.error(`Failed to update staff presence embed in channel ${config.channelId}:`, error);
+            console.error(`SupportChannelManager: Failed to update staff presence embed in channel ${config.channelId}:`, error);
           }
+        } else {
+          console.warn(`SupportChannelManager: Could not access channel ${config.channelId} for guild ${guildId}`);
         }
       }
 
       return true;
     } catch (error) {
-      console.error('Failed to update staff presence embed:', error);
+      console.error('SupportChannelManager: Failed to update staff presence embed:', error);
       return false;
     }
   }

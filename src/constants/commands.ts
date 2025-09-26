@@ -19,8 +19,8 @@ export const STATUS_EMOJIS = {
 };
 
 export const SUPPORT_MESSAGES = {
-  TITLE: '🎫 Support Ticket System',
-  DESCRIPTION: 'Click the button below to create a support ticket. Our staff will assist you as soon as possible.',
+  TITLE: '🎫 Xploits.cc Support Center',
+  DESCRIPTION: `**Welcome to our professional support system**\nWe're here to assist you with any questions or issues you may have.`,
   WELCOME_MESSAGE: 'Welcome! Please describe your issue and our staff will help you.',
   FOOTER_TEXT: 'Xploits Support System',
   HEADER_TEXT: {
@@ -58,7 +58,7 @@ export const SUCCESS_MESSAGES = {
 
 export const VALID_PRESENCE_STATUSES = ['online', 'idle', 'dnd', 'offline'] as const;
 
-export type ValidPresenceStatus = 'online' | 'idle' | 'dnd' | 'offline';
+export type ValidPresenceStatus = 'online' | 'idle' | 'dnd' | 'offline'; // FIXME: hmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
 
 export const DEFAULT_CATEGORIES = {
   TICKETS: undefined as string | undefined,

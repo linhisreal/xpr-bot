@@ -20,12 +20,15 @@ import {
   TextInputBuilder,
   TextInputStyle,
   ModalSubmitInteraction,
+  MessageFlags,
 } from 'discord.js';
 import {TicketManager} from './ticketManager.js';
 import {CommandHandler} from './commandHandler.js';
 import {InteractionManager} from '../modules/InteractionManager.js';
 import {SupportChannelManager} from '../modules/SupportChannelManager.js';
 import {TicketControlsManager} from '../modules/TicketControlsManager.js';
+import {OperationQueue, OperationType, OperationPriority} from './operationQueue.js';
+import { sendTicketSummary, TicketSendResult } from '../utils/transcriptSender.js';
 
 /**
  * Main bot class
@@ -37,14 +40,16 @@ export class TicketBot {
   private readonly interactionManager: InteractionManager;
   private readonly supportChannelManager: SupportChannelManager;
   private readonly ticketControlsManager: TicketControlsManager;
+  private readonly operationQueue: OperationQueue;
 
   constructor(client: Client) {
     this.client = client;
-    this.ticketManager = new TicketManager();
+    this.ticketManager = new TicketManager(this.client);
     this.interactionManager = new InteractionManager();
     this.supportChannelManager = new SupportChannelManager();
     this.commandHandler = new CommandHandler(this.ticketManager, this.interactionManager, this.supportChannelManager);
     this.ticketControlsManager = new TicketControlsManager(this.ticketManager, this.interactionManager);
+    this.operationQueue = new OperationQueue();
     this.setupEventListeners();
   }
 
@@ -109,6 +114,82 @@ export class TicketBot {
   }
 
   /**
+   * Validates and recovers ticket data after bot restart
+   */
+  private async validateAndRecoverTicketData(): Promise<void> {
+    console.log('Enhanced Support System: Starting ticket data validation and recovery...');
+    
+    try {
+      // Wait for ticket manager to be ready
+      await this.ticketManager.ready;
+      
+      let totalTicketsChecked = 0;
+      let staleTicketsRemoved = 0;
+      let threadsRecovered = 0;
+      
+      // Get all guilds the bot is in
+      for (const guild of this.client.guilds.cache.values()) {
+        const guildTickets = this.ticketManager.getGuildTickets(guild.id);
+        totalTicketsChecked += guildTickets.length;
+        
+        console.log(`Validating ${guildTickets.length} tickets for guild ${guild.name} (${guild.id})`);
+        
+        // Validate each ticket
+        for (const ticket of guildTickets) {
+          try {
+            if (ticket.isThread && ticket.threadId) {
+              // For thread tickets, check if the thread still exists
+              const thread = await guild.channels.fetch(ticket.threadId).catch(() => null);
+              
+              if (!thread || !thread.isThread()) {
+                console.warn(`Thread ticket ${ticket.threadId} no longer exists, removing from records`);
+                this.ticketManager.closeTicket(guild.id, ticket.threadId);
+                staleTicketsRemoved++;
+              } else if (thread.isThread() && thread.archived) {
+                console.log(`Thread ticket ${ticket.threadId} is archived but still exists, keeping in records`);
+                threadsRecovered++;
+              } else {
+                console.log(`Thread ticket ${ticket.threadId} validated successfully`);
+                threadsRecovered++;
+              }
+            } else if (!ticket.isThread && ticket.channelId) {
+              // For channel tickets, check if the channel still exists
+              const channel = await guild.channels.fetch(ticket.channelId).catch(() => null);
+              
+              if (!channel) {
+                console.warn(`Channel ticket ${ticket.channelId} no longer exists, removing from records`);
+                this.ticketManager.closeTicket(guild.id, ticket.channelId);
+                staleTicketsRemoved++;
+              } else {
+                console.log(`Channel ticket ${ticket.channelId} validated successfully`);
+              }
+            } else {
+              console.warn(`Ticket has invalid structure:`, {
+                ticketNumber: ticket.ticketNumber,
+                isThread: ticket.isThread,
+                threadId: ticket.threadId,
+                channelId: ticket.channelId
+              });
+            }
+          } catch (error) {
+            console.error(`Error validating ticket ${ticket.ticketNumber}:`, error);
+          }
+        }
+      }
+      
+      console.log('Enhanced Support System: Ticket validation completed', {
+        totalTicketsChecked,
+        staleTicketsRemoved,
+        threadsRecovered,
+        guildsProcessed: this.client.guilds.cache.size
+      });
+      
+    } catch (error) {
+      console.error('Enhanced Support System: Failed during ticket data validation:', error);
+    }
+  }
+
+  /**
    * Sets up event listeners for Discord events.
    */
   private setupEventListeners(): void {
@@ -118,8 +199,26 @@ export class TicketBot {
     this.client.on(Events.PresenceUpdate, this.onPresenceUpdate.bind(this));
   }
 
-  private onReady(): void {
+  private async onReady(): Promise<void> {
     console.log(`Bot is ready! Logged in as ${this.client.user?.tag}`);
+    
+    this.supportChannelManager.setClient(this.client);
+    
+    try {
+      await this.supportChannelManager.recoverChannelReferences();
+      console.log('Enhanced Support System: Channel reference recovery completed');
+    } catch (error) {
+      console.error('Enhanced Support System: Failed to recover channel references:', error);
+    }
+    
+    // Validate and recover existing ticket data
+    try {
+      await this.validateAndRecoverTicketData();
+      console.log('Enhanced Support System: Ticket data validation and recovery completed');
+    } catch (error) {
+      console.error('Enhanced Support System: Failed to validate ticket data:', error);
+    }
+    
     this.registerCommands();
   }
 
@@ -188,6 +287,32 @@ export class TicketBot {
       return;
     }
 
+    // Check if DMs are disabled and send ephemeral warning
+    if (processResult.dmAvailable === false) {
+      try {
+        const warningMsg = await message.reply({
+          content: `⚠️ You need to enable DMs before creating a ticket. Ticket summaries are sent via direct message when tickets are closed. Please enable DMs and try again.`,
+          allowedMentions: { repliedUser: true }
+        });
+        
+        // Auto-delete the warning after 15 seconds
+        setTimeout(() => {
+          warningMsg.delete().catch(() => {
+            console.warn('Failed to delete DM warning message');
+          });
+        }, 15000);
+        
+        console.log('Enhanced Support System: Sent DM warning reply to user', {
+          guildId: guild.id,
+          userId: member.id,
+          username: member.user.username
+        });
+      } catch (error) {
+        console.error('Enhanced Support System: Failed to send DM warning reply:', error);
+      }
+      return;
+    }
+
     if (processResult.shouldCreateTicket) {
       try {
         await this.createTicketFromMessage(message);
@@ -207,6 +332,73 @@ export class TicketBot {
   }
 
   /**
+   * Checks if a user has DMs enabled by attempting to create a DM channel and send a test message
+   */
+  private async checkUserDMAvailability(user: any): Promise<boolean> {
+    try {
+      const dmChannel = await user.createDM();
+      const testMessage = await dmChannel.send('DM test - this message will be deleted immediately');
+      await testMessage.delete();
+      console.log('TicketBot: DMs available for user', {
+        userId: user.id,
+        username: user.username
+      });
+      return true;
+    } catch (error) {
+      console.log('TicketBot: DMs unavailable for user', {
+        userId: user.id,
+        username: user.username,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Sends an ephemeral warning about DM unavailability
+   */
+  private async sendDMWarning(channel: TextChannel, member: GuildMember): Promise<void> {
+    try {
+      const warningMsg = await channel.send({
+        content: `⚠️ ${member}, your DMs appear to be disabled. You won't receive ticket summaries when your ticket is closed, but your ticket has been created successfully.`
+      });
+      
+      // Auto-delete the warning after 15 seconds
+      setTimeout(() => {
+        warningMsg.delete().catch(() => {
+          console.warn('Failed to delete DM warning message');
+        });
+      }, 15000);
+      
+      console.log('TicketBot: Sent DM unavailability warning to user', {
+        userId: member.id,
+        channelId: channel.id
+      });
+    } catch (error) {
+      console.error('TicketBot: Failed to send DM warning:', error);
+    }
+  }
+
+  /**
+   * Sends an ephemeral message about DM unavailability for ticket creation prevention
+   */
+  private async sendEphemeralDMWarning(interaction: ButtonInteraction): Promise<void> {
+    try {
+      await interaction.reply({
+        content: '⚠️ Please enable your DMs before creating a ticket. Ticket summaries are sent via direct message when tickets are closed.',
+        flags: MessageFlags.Ephemeral,
+      });
+      
+      console.log('TicketBot: Sent ephemeral DM warning to user', {
+        userId: interaction.user.id,
+        guildId: interaction.guild?.id
+      });
+    } catch (error) {
+      console.error('TicketBot: Failed to send ephemeral DM warning:', error);
+    }
+  }
+
+  /**
    * Creates a ticket thread from a user's message.
    */
   private async createTicketFromMessage(message: Message): Promise<void> {
@@ -214,22 +406,34 @@ export class TicketBot {
     if (!guild || !member) return;
 
     try {
+      // Check DM availability at the beginning of ticket creation process
+      const dmAvailable = await this.checkUserDMAvailability(member.user);
+      
       const ticketNumber = this.ticketManager.getNextTicketNumber(guild.id);
       const threadName = `ticket-${member.user.username.toLowerCase().replace(/[^a-z0-9]/g, '-')}`;
 
+      // Check if message still exists before trying to create thread
+      let messageExists = true;
       try {
         await message.fetch();
       } catch (fetchError) {
         console.error('Message no longer exists, cannot create thread:', fetchError);
+        messageExists = false;
+      }
+
+      let thread;
+      if (messageExists) {
+        // Message exists, create thread normally
+        thread = await message.startThread({
+          name: threadName,
+          autoArchiveDuration: 10080,
+          reason: `Support ticket #${ticketNumber} created by ${member.user.username}`,
+        });
+      } else {
+        // Message doesn't exist, use fallback method
         await this.createFallbackTicketThread(guild, member, content, channel as TextChannel, ticketNumber, threadName);
         return;
       }
-
-      const thread = await message.startThread({
-        name: threadName,
-        autoArchiveDuration: 10080,
-        reason: `Support ticket #${ticketNumber} created by ${member.user.username}`,
-      });
 
       this.ticketManager.createTicket(
         guild.id,
@@ -237,7 +441,7 @@ export class TicketBot {
         channel.id,
         ticketNumber,
         threadName,
-        content,
+        content || 'No description provided',
         thread.id
       );
 
@@ -254,40 +458,123 @@ export class TicketBot {
         content: `${member} Welcome to your support ticket! Please describe your issue and our team will assist you shortly.`
       });
 
-      await this.ticketControlsManager.createTicketControls(thread as any, {
-        ticketId: thread.id,
-        ticketNumber: ticketNumber,
-        creator: member.user,
-        claimedBy: undefined,
-        isLocked: false,
-        escalationLevel: 0,
-        status: 'open'
+      // Add validation for description
+      const validatedDescription = content && content.trim() ? content.trim() : undefined;
+
+      // Use operation queue for proper ordering of ticket creation operations
+      const batchId = `create-ticket-${member.id}-${Date.now()}`;
+      console.log(`Starting ticket creation operations for user ${member.id}`);
+
+      // HIGH PRIORITY: Create ticket controls with description
+      this.operationQueue.enqueue({
+        id: `${batchId}-create-controls`,
+        type: OperationType.DATA,
+        priority: OperationPriority.HIGH,
+        description: `Create ticket controls for thread ${thread.id}`,
+        execute: async () => {
+          await this.ticketControlsManager.createTicketControls(thread as any, {
+            ticketId: thread.id,
+            ticketNumber: ticketNumber,
+            creator: member.user,
+            description: validatedDescription,
+            claimedBy: undefined,
+            isLocked: false,
+            escalationLevel: 0,
+            status: 'open'
+          });
+          return { controlsCreated: true };
+        }
       });
 
-      const staffPings = await this.getSmartStaffPings(guild.id, staffList);
+      // MEDIUM PRIORITY: Send staff notifications
+      this.operationQueue.enqueue({
+        id: `${batchId}-staff-notification`,
+        type: OperationType.UI_UPDATE,
+        priority: OperationPriority.MEDIUM,
+        description: `Send staff notification for new ticket`,
+        execute: async () => {
+          const staffPings = await this.getSmartStaffPings(guild.id, staffList);
+          if (staffPings.trim()) {
+            await thread.send({
+              content: `🔔 ${staffPings} - New support ticket requires assistance.`
+            });
+          }
+          return { notificationSent: true, staffPings };
+        }
+      });
 
-      if (staffPings.trim()) {
-        await thread.send({
-          content: `🔔 ${staffPings} - New support ticket requires assistance.`
+      // LOW PRIORITY: Send DM warning if needed
+      if (!dmAvailable) {
+        this.operationQueue.enqueue({
+          id: `${batchId}-dm-warning`,
+          type: OperationType.CLEANUP,
+          priority: OperationPriority.LOW,
+          description: `Send DM unavailability warning`,
+          execute: async () => {
+            await this.sendDMWarning(channel as TextChannel, member);
+            return { dmWarningSent: true };
+          }
         });
       }
 
-      await message.react('✅');
+      // LOW PRIORITY: React to message
+      this.operationQueue.enqueue({
+        id: `${batchId}-react-message`,
+        type: OperationType.CLEANUP,
+        priority: OperationPriority.LOW,
+        description: `React to original message`,
+        execute: async () => {
+          try {
+            await message.react('✅');
+            return { reactionAdded: true };
+          } catch (reactError) {
+            console.warn('Failed to react to message (may have been deleted):', reactError);
+            return { reactionAdded: false, error: reactError instanceof Error ? reactError.message : String(reactError) };
+          }
+        }
+      });
 
+      // CRITICAL PRIORITY: Delete original message (ALWAYS LAST)
       const supportChannelConfig = this.supportChannelManager.getSupportChannelConfig(channel.id);
       if (supportChannelConfig?.deleteUserMessages) {
-        try {
-          await message.delete();
-          console.log('Original message deleted after successful thread creation');
-        } catch (deleteError) {
-          console.warn('Failed to delete original message after thread creation:', deleteError);
-        }
+        this.operationQueue.enqueue({
+          id: `${batchId}-delete-message`,
+          type: OperationType.DELETE,
+          priority: OperationPriority.CRITICAL,
+          description: `Delete original user message`,
+          execute: async () => {
+            try {
+              await message.delete();
+              console.log('Original message deleted after successful thread creation');
+              return { messageDeleted: true };
+            } catch (deleteError) {
+              console.warn('Failed to delete original message after thread creation:', deleteError);
+              return { messageDeleted: false, error: deleteError instanceof Error ? deleteError.message : String(deleteError) };
+            }
+          },
+          rollback: async () => {
+            // Cannot rollback message deletion
+            console.log('Cannot rollback message deletion');
+          }
+        });
       }
+
+      // Process all operations in order
+      console.log(`Processing ${this.operationQueue.getStatus().queueLength} operations for ticket creation`);
+      const results = await this.operationQueue.processQueue();
+      
+      const successfulOps = results.filter(r => r.success).length;
+      const totalOps = results.length;
+      
+      console.log(`Ticket creation completed: ${successfulOps}/${totalOps} operations successful`);
+
+      // Original createTicketControls call removed as it's now handled by operation queue
 
     } catch (error) {
       console.error('Error creating ticket thread from message:', error);
       
       try {
+        // Check if message still exists before trying to reply
         await message.fetch();
         const errorMsg = await message.reply({
           content: '❌ There was an error creating your ticket. Please try again or contact an administrator.',
@@ -321,6 +608,9 @@ export class TicketBot {
     threadName: string
   ): Promise<void> {
     try {
+      // Check DM availability for fallback ticket creation
+      const dmAvailable = await this.checkUserDMAvailability(member.user);
+      
       const tempMessage = await channel.send({
         content: `Support ticket requested by ${member.displayName}`,
         allowedMentions: { users: [] }
@@ -338,7 +628,7 @@ export class TicketBot {
         channel.id,
         ticketNumber,
         threadName,
-        content,
+        content || 'No description provided',
         thread.id
       );
 
@@ -355,29 +645,89 @@ export class TicketBot {
         content: `${member} Welcome to your support ticket! Please describe your issue and our team will assist you shortly.`
       });
 
-      await this.ticketControlsManager.createTicketControls(thread as any, {
-        ticketId: thread.id,
-        ticketNumber: ticketNumber,
-        creator: member.user,
-        claimedBy: undefined,
-        isLocked: false,
-        escalationLevel: 0,
-        status: 'open'
+      // Add validation for description in fallback
+      const validatedDescription = content && content.trim() ? content.trim() : undefined;
+
+      // Use operation queue for fallback ticket creation operations
+      const batchId = `fallback-ticket-${member.id}-${Date.now()}`;
+      console.log(`Starting fallback ticket creation operations for user ${member.id}`);
+
+      // HIGH PRIORITY: Create ticket controls
+      this.operationQueue.enqueue({
+        id: `${batchId}-create-controls`,
+        type: OperationType.DATA,
+        priority: OperationPriority.HIGH,
+        description: `Create ticket controls for fallback thread ${thread.id}`,
+        execute: async () => {
+          await this.ticketControlsManager.createTicketControls(thread as any, {
+            ticketId: thread.id,
+            ticketNumber: ticketNumber,
+            creator: member.user,
+            description: validatedDescription,
+            claimedBy: undefined,
+            isLocked: false,
+            escalationLevel: 0,
+            status: 'open'
+          });
+          return { controlsCreated: true };
+        }
       });
 
-      const staffPings = await this.getSmartStaffPings(guild.id, staffList);
+      // MEDIUM PRIORITY: Send staff notifications
+      this.operationQueue.enqueue({
+        id: `${batchId}-staff-notification`,
+        type: OperationType.UI_UPDATE,
+        priority: OperationPriority.MEDIUM,
+        description: `Send staff notification for fallback ticket`,
+        execute: async () => {
+          const staffPings = await this.getSmartStaffPings(guild.id, staffList);
+          if (staffPings.trim()) {
+            await thread.send({
+              content: `🔔 ${staffPings} - New support ticket requires assistance.`
+            });
+          }
+          return { notificationSent: true };
+        }
+      });
 
-      if (staffPings.trim()) {
-        await thread.send({
-          content: `🔔 ${staffPings} - New support ticket requires assistance.`
+      // LOW PRIORITY: Send DM warning if needed
+      if (!dmAvailable) {
+        this.operationQueue.enqueue({
+          id: `${batchId}-dm-warning`,
+          type: OperationType.CLEANUP,
+          priority: OperationPriority.LOW,
+          description: `Send DM warning for fallback ticket`,
+          execute: async () => {
+            await this.sendDMWarning(channel, member);
+            return { dmWarningSent: true };
+          }
         });
       }
 
-      try {
-        await tempMessage.delete();
-      } catch (deleteError) {
-        console.warn('Failed to delete temporary message:', deleteError);
-      }
+      // CRITICAL PRIORITY: Delete temporary message (ALWAYS LAST)
+      this.operationQueue.enqueue({
+        id: `${batchId}-delete-temp-message`,
+        type: OperationType.DELETE,
+        priority: OperationPriority.CRITICAL,
+        description: `Delete temporary message used for thread creation`,
+        execute: async () => {
+          try {
+            await tempMessage.delete();
+            console.log('Temporary message deleted after fallback thread creation');
+            return { tempMessageDeleted: true };
+          } catch (deleteError) {
+            console.warn('Failed to delete temporary message:', deleteError);
+            return { tempMessageDeleted: false, error: deleteError instanceof Error ? deleteError.message : String(deleteError) };
+          }
+        }
+      });
+
+      // Process all operations in order
+      console.log(`Processing ${this.operationQueue.getStatus().queueLength} operations for fallback ticket creation`);
+      const results = await this.operationQueue.processQueue();
+      
+      const successfulOps = results.filter(r => r.success).length;
+      console.log(`Fallback ticket creation completed: ${successfulOps}/${results.length} operations successful`);
 
       console.log('Fallback ticket thread created successfully');
     } catch (error) {
@@ -593,9 +943,9 @@ export class TicketBot {
       if (isCommand || isButton || isModal) {
         const actionable = interaction as ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction;
         if (actionable.replied || actionable.deferred) {
-          await actionable.followUp({content: errorMessage, ephemeral: true});
+          await actionable.followUp({content: errorMessage, flags: MessageFlags.Ephemeral});
         } else {
-          await actionable.reply({content: errorMessage, ephemeral: true});
+          await actionable.reply({content: errorMessage, flags: MessageFlags.Ephemeral});
         }
       } else {
         console.error('Cannot send error reply for this interaction type.');
@@ -611,7 +961,7 @@ export class TicketBot {
     if (!guild) {
       await interaction.reply({
         content: 'This command can only be used in a server.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -624,7 +974,7 @@ export class TicketBot {
         if (!interaction.replied && !interaction.deferred) {
           await interaction.reply({
             content: '❌ An error occurred while processing your request.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
       }
@@ -644,7 +994,7 @@ export class TicketBot {
     if (!channel) {
       await interaction.reply({
         content: 'This can only be used in a ticket channel or thread.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -655,7 +1005,7 @@ export class TicketBot {
     if (!ticket) {
       await interaction.reply({
         content: 'This channel is not a valid ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -684,7 +1034,7 @@ export class TicketBot {
       console.error('Error renaming ticket:', error);
       await interaction.reply({
         content: 'Failed to rename the ticket. Please try again.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -697,7 +1047,7 @@ export class TicketBot {
     if (!guild) {
       await interaction.reply({
         content: 'This command can only be used in a server.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -713,7 +1063,7 @@ export class TicketBot {
       console.error('Failed to fetch guild member:', err);
       await interaction.reply({
         content: 'Unable to resolve your member information.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -728,7 +1078,7 @@ export class TicketBot {
           if (!interaction.replied && !interaction.deferred) {
             await interaction.reply({
               content: `❌ ${result.error}`,
-              ephemeral: true,
+              flags: MessageFlags.Ephemeral,
             });
           }
         }
@@ -737,7 +1087,7 @@ export class TicketBot {
         if (!interaction.replied && !interaction.deferred) {
           await interaction.reply({
             content: '❌ An error occurred while processing your request.',
-            ephemeral: true,
+            flags: MessageFlags.Ephemeral,
           });
         }
       }
@@ -766,7 +1116,7 @@ export class TicketBot {
       default:
         await interaction.reply({
           content: 'Unknown button interaction.',
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
     }
   }
@@ -776,6 +1126,13 @@ export class TicketBot {
     guild: Guild,
     member: GuildMember
   ): Promise<void> {
+    // Check DM availability before ticket creation
+    const dmAvailable = await this.checkUserDMAvailability(member.user);
+    if (!dmAvailable) {
+      await this.sendEphemeralDMWarning(interaction);
+      return;
+    }
+
     const existingTicket = this.ticketManager.getUserTicket(
       guild.id,
       member.id
@@ -809,13 +1166,13 @@ export class TicketBot {
       if (ticketExists && ticketReference) {
         await interaction.reply({
           content: `You already have an open ticket: ${ticketReference}`,
-          ephemeral: true,
+          flags: MessageFlags.Ephemeral,
         });
         return;
       }
     }
 
-    await interaction.deferReply({ephemeral: true});
+    await interaction.deferReply({flags: MessageFlags.Ephemeral});
 
     const categoryName = 'Tickets';
     let category = guild.channels.cache.find(
@@ -897,7 +1254,7 @@ export class TicketBot {
     if (!guild || !guildMember || !channel) {
       await interaction.reply({
         content: 'Unable to close ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -908,7 +1265,7 @@ export class TicketBot {
     if (!channelId) {
       await interaction.reply({
         content: 'Unable to determine ticket location.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -918,7 +1275,7 @@ export class TicketBot {
     if (!ticket) {
       await interaction.reply({
         content: 'This channel is not a valid ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -932,24 +1289,42 @@ export class TicketBot {
     if (!isTicketOwner && !hasManageChannels && !isStaff) {
       await interaction.reply({
         content: 'You do not have permission to close this ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
 
     await interaction.deferReply();
 
+    // Close the ticket with transcript generation
+    const closeResult = await this.ticketManager.closeTicketWithAuth(guild.id, ticketId, guildMember.id, true);
+    if (!closeResult.success) {
+      await interaction.editReply({
+        content: 'Failed to close ticket.',
+      });
+      return;
+    }
+
+    // Send enhanced transcript to ticket owner
+    const transcriptResult: TicketSendResult = await sendTicketSummary(
+      closeResult.summary!,
+      this.client
+    );
+
+    let description = `This ticket has been closed by ${guildMember.displayName}.`;
+    if (transcriptResult.wasSent) {
+      description += '\n📨 A transcript has been sent to the user via DM.';
+    } else {
+      description += `\n⚠️ Could not send transcript via DM: ${transcriptResult.error?.message || 'Unknown error'}`;
+    }
+
     const embed = new EmbedBuilder()
       .setTitle('🔒 Ticket Closed')
-      .setDescription(
-        `This ticket has been closed by ${guildMember.displayName}.`
-      )
+      .setDescription(description)
       .setColor(0xff0000)
       .setTimestamp();
 
     await interaction.editReply({embeds: [embed]});
-
-    this.ticketManager.closeTicket(guild.id, ticketId);
 
     setTimeout(async () => {
       try {
@@ -977,7 +1352,7 @@ export class TicketBot {
     if (!channel) {
       await interaction.reply({
         content: 'Unable to claim ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -985,7 +1360,7 @@ export class TicketBot {
     if (!this.ticketManager.isStaff(guild.id, guildMember.id)) {
       await interaction.reply({
         content: 'You must be a staff member to claim tickets.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -996,7 +1371,7 @@ export class TicketBot {
     if (!ticket) {
       await interaction.reply({
         content: 'This channel is not a valid ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1004,7 +1379,7 @@ export class TicketBot {
     if (ticket.claimedBy) {
       await interaction.reply({
         content: `This ticket is already claimed by <@${ticket.claimedBy}>.`,
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1048,7 +1423,7 @@ export class TicketBot {
     } else {
       await interaction.reply({
         content: 'Failed to claim ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -1065,7 +1440,7 @@ export class TicketBot {
     if (!channel) {
       await interaction.reply({
         content: 'Unable to lock ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1073,7 +1448,7 @@ export class TicketBot {
     if (!this.ticketManager.isStaff(guild.id, guildMember.id)) {
       await interaction.reply({
         content: 'You must be a staff member to lock tickets.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1128,7 +1503,7 @@ export class TicketBot {
     } else {
       await interaction.reply({
         content: 'Failed to lock ticket. You may not have permission or the ticket is already locked.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -1145,7 +1520,7 @@ export class TicketBot {
     if (!channel) {
       await interaction.reply({
         content: 'Unable to unlock ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1156,7 +1531,7 @@ export class TicketBot {
     if (!ticket) {
       await interaction.reply({
         content: 'This channel is not a valid ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1164,7 +1539,7 @@ export class TicketBot {
     if (ticket.claimedBy !== guildMember.id) {
       await interaction.reply({
         content: 'Only the staff member who claimed this ticket can unlock it.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }
@@ -1216,7 +1591,7 @@ export class TicketBot {
     } else {
       await interaction.reply({
         content: 'Failed to unlock ticket.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
     }
   }
@@ -1232,7 +1607,7 @@ export class TicketBot {
     if (!this.ticketManager.isStaff(guild.id, guildMember.id)) {
       await interaction.reply({
         content: 'You must be a staff member to rename tickets.',
-        ephemeral: true,
+        flags: MessageFlags.Ephemeral,
       });
       return;
     }

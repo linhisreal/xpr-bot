@@ -1,4 +1,10 @@
-import { BaseInteraction, ButtonInteraction, ModalSubmitInteraction, ChatInputCommandInteraction } from 'discord.js';
+import {
+  ChatInputCommandInteraction,
+  ButtonInteraction,
+  ModalSubmitInteraction,
+  BaseInteraction,
+  MessageFlags,
+} from 'discord.js';
 
 /**
  * Interface representing the state of an interaction
@@ -101,7 +107,7 @@ export class InteractionManager {
       if (interaction.deferred) {
         return await this.safeEditReply(interaction, options);
       } else if (!interaction.replied) {
-        return await this.safeReply(interaction, { ...options, ephemeral: true });
+        return await this.safeReply(interaction, { ...options, flags: MessageFlags.Ephemeral });
       } else {
         return await this.safeFollowUp(interaction, options);
       }
@@ -116,11 +122,11 @@ export class InteractionManager {
   }
 
   /**
-   * Safely defers an interaction reply with enhanced error handling for deferred workflows
+   * Safely defers an interaction reply with error handling for deferred workflows
    */
   async safeDefer(
     interaction: ButtonInteraction | ModalSubmitInteraction | ChatInputCommandInteraction,
-    options?: { ephemeral?: boolean }
+    options?: { ephemeral?: boolean; flags?: any }
   ): Promise<boolean> {
     const state = this.interactions.get(interaction.id);
     
@@ -140,7 +146,7 @@ export class InteractionManager {
     }
 
     try {
-      await interaction.deferReply(options || { ephemeral: true });
+      await interaction.deferReply(options || { flags: MessageFlags.Ephemeral });
       this.updateInteractionState(interaction.id, { deferred: true });
       console.log(`InteractionManager: Successfully deferred interaction ${interaction.id}`);
       return true;
@@ -169,7 +175,7 @@ export class InteractionManager {
     this.trackInteraction(interaction);
 
     try {
-      await interaction.deferReply(options || { ephemeral: true });
+      await interaction.deferReply(options || { flags: MessageFlags.Ephemeral });
       this.updateInteractionState(interaction.id, { deferred: true });
       console.log(`InteractionManager: Immediate defer successful for interaction ${interaction.id}`);
       return true;

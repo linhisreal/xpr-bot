@@ -3,7 +3,8 @@
 const CHANNEL_ID = 'channel123';
 const TEST_CHANNEL_ID = 'testchannel123';
 const STRICT_CHANNEL_ID = 'strictchannel123';
-const MESSAGE_ID = 'message123';
+
+const TEST_CHANNEL_IDS = [CHANNEL_ID, TEST_CHANNEL_ID, STRICT_CHANNEL_ID, 'sendconfig123'];
 
 function createMockChannel(overrides?: Partial<any>) {
   return {
@@ -13,26 +14,75 @@ function createMockChannel(overrides?: Partial<any>) {
   } as any;
 }
 
-function createMockMessage(overrides?: Partial<any>) {
-  return {
-    id: MESSAGE_ID,
-    author: { bot: false },
-    system: false,
-    content: 'hello',
-    channel: { id: TEST_CHANNEL_ID },
-    attachments: { size: 0 },
-    delete: jest.fn().mockResolvedValue(true),
-    ...overrides,
-  } as any;
+function createMockMessage(contentOrOverrides: string | any, channelId: string = 'test-channel'): any {
+  if (typeof contentOrOverrides === 'string') {
+    return {
+      id: 'test-message-id',
+      content: contentOrOverrides,
+      author: { 
+        bot: false,
+        createDM: jest.fn().mockResolvedValue({
+          send: jest.fn().mockResolvedValue({
+            delete: jest.fn().mockResolvedValue(undefined)
+          })
+        })
+      },
+      channel: { id: channelId },
+      attachments: new Map(),
+      delete: jest.fn().mockResolvedValue(undefined)
+    };
+  } else {
+    return {
+      id: 'test-message-id',
+      content: '',
+      author: { 
+        bot: false,
+        createDM: jest.fn().mockResolvedValue({
+          send: jest.fn().mockResolvedValue({
+            delete: jest.fn().mockResolvedValue(undefined)
+          })
+        })
+      },
+      channel: { id: 'test-channel' },
+      attachments: new Map(),
+      delete: jest.fn().mockResolvedValue(undefined),
+      ...contentOrOverrides
+    };
+  }
+}
+
+/**
+ * Cleanup function to remove test channels from the configuration
+ */
+function cleanupTestChannels(supportChannelManager: SupportChannelManager) {
+  try {
+    supportChannelManager.removeTestChannels(TEST_CHANNEL_IDS);
+  } catch (error) {
+    console.warn('Failed to cleanup test channels:', error);
+  }
 }
 
 describe('SupportChannelManager Basic Functionality', () => {
   let supportChannelManager: SupportChannelManager;
 
+  beforeAll(() => {
+    const tempInstance = new SupportChannelManager();
+    tempInstance.backupConfigurationFile();
+  });
+
+  afterAll(() => {
+    const tempInstance = new SupportChannelManager();
+    tempInstance.restoreConfigurationFile();
+  });
+
   beforeEach(() => {
     jest.clearAllMocks();
     supportChannelManager = new SupportChannelManager();
     supportChannelManager.clearAllConfigurations();
+  });
+
+  afterEach(() => {
+    cleanupTestChannels(supportChannelManager);
   });
 
   describe('Configuration Management', () => {
@@ -182,7 +232,7 @@ describe('SupportChannelManager Basic Functionality', () => {
         strictFiltering: true
       });
 
-      const mockMessage = createMockMessage({ channel: { id: STRICT_CHANNEL_ID }, content: 'hi' });
+      const mockMessage = createMockMessage('hi', STRICT_CHANNEL_ID);
 
       const result = await supportChannelManager.processMessage(mockMessage as any);
       expect(result.success).toBe(true);
@@ -197,7 +247,7 @@ describe('SupportChannelManager Basic Functionality', () => {
         strictFiltering: true
       });
 
-      const mockMessage = createMockMessage({ channel: { id: STRICT_CHANNEL_ID }, content: 'I need help with my account settings please' });
+      const mockMessage = createMockMessage('I need help with my account settings please', STRICT_CHANNEL_ID);
 
       const result = await supportChannelManager.processMessage(mockMessage as any);
       expect(result.success).toBe(true);

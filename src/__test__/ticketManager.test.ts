@@ -1065,9 +1065,9 @@ describe('TicketManager', () => {
       ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-user1');
       ticketManager.addUserToWhitelist('guild1', 'channel1', 'user2', 'staff1');
       
-  const newManager = new TicketManager(mockClient, testFilePath);
-  await newManager.ready;
-  expect(typeof newManager.getTicketWhitelist).toBe('function');
+      const newManager = new TicketManager(mockClient, testFilePath);
+      await newManager.ready;
+      expect(typeof newManager.getTicketWhitelist).toBe('function');
     });
 
     it('should maintain notes and escalation data integrity', async () => {
@@ -1079,6 +1079,123 @@ describe('TicketManager', () => {
       const ticket = ticketManager.getTicketByChannel('guild1', 'channel1');
       expect(ticket?.notes).toBe('Persistent note');
       expect(ticket?.escalationLevel).toBe(1);
+    });
+
+    it('should persist thread tickets across manager restarts', async () => {
+      await ticketManager.addStaff('guild1', 'staff1');
+      
+      const channelTicket = ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-user1', 'Channel ticket description');
+      const threadTicket = ticketManager.createTicket('guild1', 'user2', 'channel2', 2, 'ticket-user2', 'Thread ticket description', 'thread123');
+      
+      expect(channelTicket.isThread).toBe(false);
+      expect(threadTicket.isThread).toBe(true);
+      expect(threadTicket.threadId).toBe('thread123');
+      
+      await (ticketManager as any).saveTicketData();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      
+      const newManager = new TicketManager(mockClient, testFilePath);
+      await newManager.ready;
+      
+      const recoveredChannelTicket = newManager.getTicketByChannel('guild1', 'channel1');
+      const recoveredThreadTicket = newManager.getTicketByThread('guild1', 'thread123');
+      
+      expect(recoveredChannelTicket).toBeDefined();
+      expect(recoveredChannelTicket?.isThread).toBe(false);
+      expect(recoveredChannelTicket?.description).toBe('Channel ticket description');
+      
+      expect(recoveredThreadTicket).toBeDefined();
+      expect(recoveredThreadTicket?.isThread).toBe(true);
+      expect(recoveredThreadTicket?.threadId).toBe('thread123');
+      expect(recoveredThreadTicket?.description).toBe('Thread ticket description');
+    });
+
+    it('should handle thread ticket key consistency', async () => {
+      await ticketManager.addStaff('guild1', 'staff1');
+      
+      const ticket = ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-user1', 'Test description', 'thread456');
+      
+      const byThread = ticketManager.getTicketByThread('guild1', 'thread456');
+      const byGeneral = ticketManager.getTicket('guild1', 'thread456');
+      
+      expect(byThread).toBeDefined();
+      expect(byGeneral).toBeDefined();
+      expect(byThread?.threadId).toBe('thread456');
+      expect(byGeneral?.threadId).toBe('thread456');
+      
+      expect(byThread).toBe(ticket);
+      expect(byGeneral).toBe(ticket);
+    });
+
+    it('should recover from corrupted thread ticket data', async () => {
+      await ticketManager.addStaff('guild1', 'staff1');
+      
+      ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-user1', 'Test description', 'thread789');
+      
+      const guildTickets = (ticketManager as any).tickets.get('guild1');
+      const ticket = guildTickets.get('thread789');
+      if (ticket) {
+        delete ticket.threadId;
+        ticket.isThread = true;
+      }
+      
+      await (ticketManager as any).saveTicketData();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const newManager = new TicketManager(mockClient, testFilePath);
+      await newManager.ready;
+      
+      const recoveredTicket = newManager.getTicket('guild1', 'thread789');
+      expect(recoveredTicket).toBeDefined();
+    });
+
+    it('should validate mixed ticket types in same guild', async () => {
+      await ticketManager.addStaff('guild1', 'staff1');
+      
+      ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-1', 'Channel ticket 1');
+      ticketManager.createTicket('guild1', 'user2', 'channel2', 2, 'ticket-2', 'Thread ticket 1', 'thread001');
+      ticketManager.createTicket('guild1', 'user3', 'channel3', 3, 'ticket-3', 'Channel ticket 2');
+      ticketManager.createTicket('guild1', 'user4', 'channel4', 4, 'ticket-4', 'Thread ticket 2', 'thread002');
+      
+      await (ticketManager as any).saveTicketData();
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const newManager = new TicketManager(mockClient, testFilePath);
+      await newManager.ready;
+      
+      expect(newManager.getTicketByChannel('guild1', 'channel1')).toBeDefined();
+      expect(newManager.getTicketByChannel('guild1', 'channel3')).toBeDefined();
+      expect(newManager.getTicketByThread('guild1', 'thread001')).toBeDefined();
+      expect(newManager.getTicketByThread('guild1', 'thread002')).toBeDefined();
+      
+      const thread1 = newManager.getTicketByThread('guild1', 'thread001');
+      const thread2 = newManager.getTicketByThread('guild1', 'thread002');
+      
+      expect(thread1?.isThread).toBe(true);
+      expect(thread1?.threadId).toBe('thread001');
+      expect(thread2?.isThread).toBe(true);
+      expect(thread2?.threadId).toBe('thread002');
+    });
+
+    it('should handle thread validation without race conditions', async () => {
+      await ticketManager.addStaff('guild1', 'staff1');
+      
+      ticketManager.createTicket('guild1', 'user1', 'channel1', 1, 'ticket-user1', 'Test description', 'thread555');
+      
+      const promises = [];
+      for (let i = 0; i < 10; i++) {
+        promises.push(Promise.resolve(ticketManager.getUserTicket('guild1', 'user1')));
+      }
+      
+      const results = await Promise.all(promises);
+      
+      results.forEach(result => {
+        expect(result).toBeDefined();
+        expect(result?.threadId).toBe('thread555');
+        expect(result?.isThread).toBe(true);
+      });
+      
+      const finalTicket = ticketManager.getUserTicket('guild1', 'user1');
+      expect(finalTicket).toBeDefined();
+      expect(finalTicket?.threadId).toBe('thread555');
     });
   });
 });

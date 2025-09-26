@@ -12,6 +12,16 @@ import {
 } from 'discord.js';
 
 function createMockTicketManager(): jest.Mocked<TicketManager> {
+  const mockSummary = {
+    ticketNumber: 1,
+    creator: 'user123',
+    description: 'Test ticket description',
+    notes: 'Test notes',
+    duration: '1 hour',
+    closedBy: 'staff123',
+    closedAt: new Date()
+  };
+
   return {
     lockTicket: jest.fn().mockReturnValue(true),
     unlockTicket: jest.fn().mockReturnValue(true),
@@ -19,7 +29,7 @@ function createMockTicketManager(): jest.Mocked<TicketManager> {
     unclaimTicket: jest.fn().mockReturnValue(true),
     escalateTicket: jest.fn().mockReturnValue({ success: true, newLevel: 1 }),
     closeTicket: jest.fn().mockReturnValue(true),
-    closeTicketWithAuth: jest.fn().mockReturnValue(true),
+    closeTicketWithAuth: jest.fn().mockReturnValue({ success: true, summary: mockSummary }),
     updateTicketNotes: jest.fn().mockReturnValue(true),
     addUserToWhitelist: jest.fn().mockReturnValue(true),
     removeUserFromWhitelist: jest.fn().mockReturnValue(true),
@@ -71,7 +81,23 @@ function createMockTicketManager(): jest.Mocked<TicketManager> {
         return ['user123', 'staff1', 'staff2'];
       }
       return ['staff1', 'staff2'];
-    })
+    }),
+    getGuildTickets: jest.fn().mockReturnValue([
+      {
+        guildId: 'guild123',
+        userId: 'user123',
+        channelId: 'channel123',
+        ticketNumber: 1,
+        createdAt: new Date(),
+        description: 'Test ticket description',
+        notes: 'Test notes',
+        isLocked: false,
+        channelName: 'ticket-testuser',
+        isThread: true,
+        escalationLevel: 0,
+        whitelistedUsers: []
+      }
+    ])
   } as unknown as jest.Mocked<TicketManager>;
 }
 
@@ -471,9 +497,7 @@ describe('TicketControlsManager', () => {
 
     test('should handle unknown modal submission', async () => {
       const mockInteraction = createMockModalInteraction('unknown_modal');
-      
       await ticketControlsManager.handleModalSubmit(mockInteraction);
-
       expect(mockInteractionManager.safeReply).toHaveBeenCalledWith(
         mockInteraction,
         expect.objectContaining({
@@ -485,14 +509,12 @@ describe('TicketControlsManager', () => {
     test('should handle modal submission errors', async () => {
       const mockInteraction = createMockModalInteraction('ticket_notes_channel123');
       mockTicketManager.updateTicketNotes.mockReturnValue(false);
-      
       await ticketControlsManager.handleModalSubmit(mockInteraction);
-
       expect(mockInteractionManager.safeReply).toHaveBeenCalledWith(
         mockInteraction,
         {
           content: '❌ Failed to update ticket notes. Please check if the ticket exists and you have proper permissions.',
-          ephemeral: true
+          flags: 64
         }
       );
     });
@@ -640,10 +662,9 @@ describe('TicketControlsManager', () => {
       
       await ticketControlsManager.handleControlInteraction(mockInteraction);
 
-      expect(mockInteractionManager.safeEditReply).toHaveBeenCalledWith(
-        mockInteraction,
+      expect(mockInteraction.editReply).toHaveBeenCalledWith(
         expect.objectContaining({
-          content: expect.any(String)
+          content: expect.stringContaining('Ticket locked')
         })
       );
     });

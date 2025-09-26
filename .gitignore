@@ -1,12 +1,14 @@
+# Ignore node_modules and other build artifacts
 node_modules
 specs
 .cbc-inj
 pnpm-workspace.yaml
 .env
-scripts
+# Useless stuff
+scripts/setup-hooks.js
 dist
 data
-weao-fx
-
-#Ignore insiders AI rules
-.github\instructions\codacy.instructions.md
+__test__
+# Boring stuff i made 
+weao-fx 
+generateTranscript.js
